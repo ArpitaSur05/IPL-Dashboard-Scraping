@@ -17,7 +17,7 @@ const pusher = new Pusher({
 app.get("/points-table", async (c) => {
   const browser = await puppeteer.launch({ headless: false });
   const page = await browser.newPage();
-  await page.goto("https://www.iplt20.com/points-table/men",  {
+  await page.goto("https://www.iplt20.com/points-table/men", {
     timeout: 60000,
   });
   const content = await page.content();
@@ -47,8 +47,6 @@ app.get("/points-table", async (c) => {
   });
 
   const headerRow = rows[0];
-  console.log("Header Row:", headerRow);
-  console.log(" Row:", rows[1]);
   await browser.close();
   return c.json({
     headerRow,
@@ -126,9 +124,6 @@ app.get("/match-schedule", async (c) => {
     });
   });
 
-  console.log("✅ Scraped Match Schedule with Team Logos:");
-  console.log(matches);
-
   await browser.close();
   return c.json(matches);
 });
@@ -174,7 +169,6 @@ app.get("/score-card", async (c) => {
   players.each((i, el) => {
     const player = $(el);
     const name = player.find(".sc-pnam > .playerName").text().trim();
-    // console.log(name.text());
     const playerData = player.find(".plyData").eq(0).text().trim().split(/\s+/);
 
     const runs = playerData[0];
@@ -241,17 +235,44 @@ app.get("/score-card", async (c) => {
       ],
     },
   };
-  
-  console.log("🎯 /score-card data:", JSON.stringify(responseData, null, 2));
+
   await browser.close();
   return c.json(responseData);
 });
 
+let globalMatchLink = "";
+
 app.get("/live-match", async (c) => {
   const matchLink = c.req.query("matchLink");
-
   if (!matchLink) {
     return c.json({ error: "matchLink query parameter is required" }, 400);
+  }
+
+  globalMatchLink = matchLink;
+
+  const liveMatch = await getLiveMatch(matchLink);
+  if (liveMatch.error) {
+    return c.json(liveMatch, 400);
+  }
+  return c.json(liveMatch);
+});
+
+setInterval(async () => {
+  if (globalMatchLink) {
+    const matchLink = globalMatchLink; // Replace with the actual match link
+    const liveMatch = await getLiveMatch(matchLink);
+    if (liveMatch.error) {
+      console.error("Error fetching live match:", liveMatch.error);
+    }
+
+    pusher.trigger("my-channel", "update", liveMatch);
+  }
+}, 15000); // Fetch every 60 seconds
+
+async function getLiveMatch(matchLink: string | undefined) {
+  console.log("live match");
+  if (!matchLink) {
+    return { error: "matchLink query parameter is required" };
   }
 
   const browser = await puppeteer.launch({
@@ -261,14 +282,14 @@ app.get("/live-match", async (c) => {
 
   const page = await browser.newPage();
   await page.goto(matchLink, {
-    waitUntil: "networkidle2",
+    waitUntil: "domcontentloaded", // or "load"
     timeout: 120000,
   });
-
   try {
-    await page.waitForSelector(".ap-teams-battle-wrp", { timeout: 60000 });
-    const liveMatch : any = await page.evaluate(() => {
+    await page.waitForSelector(".ap-teams-battle-wrp", { timeout: 120000 });
+    const liveMatch: any = await page.evaluate(() => {
       const root = document.querySelector(".ap-teams-battle-wrp");
+      console.log(root);
       if (!root) return null;
 
       const team1Logo =
@@ -295,10 +316,20 @@ app.get("/live-match", async (c) => {
 
       const matchNumber =
         root.querySelector(".matchOrder")?.textContent?.trim() || "";
-      const matchSummary =
-        document.querySelector(".ms-matchComments")?.textContent?.trim() || "";
-      const isLive = document.querySelector(".live-match") ? "Yes" : "No";
 
+      let summaryText = "";
+      const matchSummary = document
+        .querySelectorAll(".ms-matchComments")
+        ?.forEach((el) => {
+          const text = el.textContent?.trim() || "";
+          if (text) {
+            summaryText = text;
+            return;
+          }
+        });
+
+      console.log(document.querySelector(".ms-matchComments"));
+      const isLive = document.querySelector(".live-match") ? "Yes" : "No";
 
       return {
         matchNumber,
@@ -314,29 +345,23 @@ app.get("/live-match", async (c) => {
           score: team2Score,
           overs: team2Overs,
         },
-        matchSummary,
+        matchSummary: summaryText,
         liveMatch: isLive,
       };
     });
-    console.log(liveMatch);
     await browser.close();
 
     if (!liveMatch) {
-      return c.json({ message: "No live match data found" }, 404);
+      return { error: "No live match data found" };
     }
 
-    pusher.trigger("my-channel", "update", liveMatch);
-
-    return c.json(liveMatch);
+    return liveMatch;
   } catch (err: any) {
     await browser.close();
     console.error("❌ Error scraping live match:", err);
-    return c.json(
-      { error: "Failed to fetch live match", details: err.message },
-      500
-    );
+    return { error: "Failed to fetch live match", details: err.message };
   }
-});
+}
 
 serve(
   {
